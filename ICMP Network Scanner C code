@@ -1,0 +1,113 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/ip_icmp.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/time.h>
+
+#define PACKET_SIZE 64
+#define RECV_TIMEOUT 1 // in seconds
+
+// ICMP packet structure
+struct icmp_packet {
+    struct icmphdr header;
+    char msg[PACKET_SIZE - sizeof(struct icmphdr)];
+};
+
+void error(const char *msg) {
+    perror(msg);
+    exit(1);
+}
+
+unsigned short checksum(void *b, int len) {    
+    unsigned short *buf = b;
+    unsigned int sum = 0;
+    unsigned short result;
+
+    for (sum = 0; len > 1; len -= 2)
+        sum += *buf++;
+    
+    if (len == 1)
+        sum += *(unsigned char *)buf;
+    
+    sum = (sum >> 16) + (sum & 0xFFFF);
+    sum += (sum >> 16);
+    result = ~sum;
+
+    return result;
+}
+
+int send_ping(int sockfd, struct sockaddr_in *addr) {
+    struct icmp_packet packet;
+    struct timeval start, end;
+    double rtt;
+
+    // Fill ICMP packet
+    memset(&packet, 0, sizeof(packet));
+    packet.header.type = ICMP_ECHO;
+    packet.header.code = 0;
+    packet.header.un.echo.id = getpid();
+    packet.header.un.echo.sequence = 1;
+    memset(&packet.msg, '0', sizeof(packet.msg));
+    packet.header.checksum = checksum(&packet, sizeof(packet));
+
+    // Record send time
+    gettimeofday(&start, NULL);
+
+    // Send ICMP packet
+    if (sendto(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)addr, sizeof(*addr)) <= 0) {
+        error("Error sending ICMP packet");
+    }
+
+    // Receive ICMP reply
+    socklen_t addrlen = sizeof(*addr);
+    if (recvfrom(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)addr, &addrlen) <= 0) {
+        printf("No response from %s\n", inet_ntoa(addr->sin_addr));
+        return 0;
+    }
+
+    // Record receive time
+    gettimeofday(&end, NULL);
+
+    // Calculate round-trip time
+    rtt = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
+    printf("Received response from %s: ICMP Echo Reply, RTT=%.3f ms\n", inet_ntoa(addr->sin_addr), rtt);
+
+    return 1;
+}
+
+int main() {
+    int sockfd;
+    struct sockaddr_in addr;
+    char network_prefix[INET_ADDRSTRLEN];
+    int i;
+
+    // Create raw socket
+    sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (sockfd < 0) {
+        error("Error creating socket");
+    }
+
+    // Get local network prefix (e.g., 192.168.1)
+    printf("Enter the network prefix (e.g., 192.168.1): ");
+    scanf("%s", network_prefix);
+
+    // Scan IPs in the range 1-254
+    for (i = 1; i <= 254; i++) {
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        sprintf(addr.sin_addr.s_addr, "%s.%d", network_prefix, i);
+
+        if (send_ping(sockfd, &addr) == 1) {
+            printf("Device %d is active on IP: %s\n", i, inet_ntoa(addr.sin_addr));
+        }
+    }
+
+    close(sockfd);
+    return 0;
+}
